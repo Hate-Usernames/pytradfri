@@ -1,3 +1,3 @@
-aiocoap==0.4a1
+https://github.com/chrysn/aiocoap/archive/10b03d8223bf67192509bc6bd1efae76312d7c54.zip#aiocoap==0.4
 DTLSSocket==0.1.4
 typing>=3,<4
