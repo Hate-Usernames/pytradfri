@@ -6,7 +6,6 @@ import logging
 from aiocoap import Message, Context
 from aiocoap.error import RequestTimedOut, Error, ConstructionRenderableError
 from aiocoap.numbers.codes import Code
-from aiocoap.transports import tinydtls
 
 from ..error import ClientError, ServerError, RequestTimeout
 from ..gateway import Gateway
@@ -14,24 +13,12 @@ from ..gateway import Gateway
 _LOGGER = logging.getLogger(__name__)
 
 
-class PatchedDTLSSecurityStore:
-    """Patched DTLS store in lieu of impl."""
-
-    IDENTITY = None
-    KEY = None
-
-    def _get_psk(self, host, port):
-        return PatchedDTLSSecurityStore.IDENTITY, PatchedDTLSSecurityStore.KEY
-
-
-tinydtls.DTLSSecurityStore = PatchedDTLSSecurityStore
-
-
 class APIFactory:
-    def __init__(self, host, psk_id='pytradfri', psk=None, loop=None):
-        self._psk = psk
+    def __init__(self, host, psk_id='pytradfri', psk='', loop=None):
+        self.psk = psk
+        self.psk_id = psk_id
+
         self._host = host
-        self._psk_id = psk_id
         self._loop = loop
         self._observations_err_callbacks = []
         self._protocol = None
@@ -39,36 +26,24 @@ class APIFactory:
         if self._loop is None:
             self._loop = asyncio.get_event_loop()
 
-        PatchedDTLSSecurityStore.IDENTITY = self._psk_id.encode('utf-8')
-
-        if self._psk:
-            PatchedDTLSSecurityStore.KEY = self._psk.encode('utf-8')
-
-    @property
-    def psk_id(self):
-        return self._psk_id
-
-    @psk_id.setter
-    def psk_id(self, value):
-        self._psk_id = value
-        PatchedDTLSSecurityStore.IDENTITY = self._psk_id.encode('utf-8')
-
-    @property
-    def psk(self):
-        return self._psk
-
-    @psk.setter
-    def psk(self, value):
-        self._psk = value
-        PatchedDTLSSecurityStore.KEY = self._psk.encode('utf-8')
-
     @asyncio.coroutine
     def _get_protocol(self):
         """Get the protocol for the request."""
         if self._protocol is None:
-            self._protocol = asyncio.Task(Context.create_client_context(
+            ctx = yield from asyncio.Task(Context.create_client_context(
                 loop=self._loop))
-        return (yield from self._protocol)
+            ctx.client_credentials.load_from_dict(
+                {
+                    'coaps://{}*'.format(self._host): {
+                        'dtls': {
+                            'psk': self.psk.encode('utf-8'),
+                            'client-identity': self.psk_id.encode('utf-8'),
+                        }
+                    }
+                }
+            )
+            self._protocol = ctx
+        return self._protocol
 
     @asyncio.coroutine
     def _reset_protocol(self, exc=None):
@@ -187,22 +162,21 @@ class APIFactory:
         """
         Generate and set a psk from the security key.
         """
-        if not self._psk:
-            PatchedDTLSSecurityStore.IDENTITY = 'Client_identity'.encode(
-                'utf-8')
-            PatchedDTLSSecurityStore.KEY = security_key.encode('utf-8')
+        if not self.psk:
+            psk_id = self.psk_id
+            self.psk_id = 'Client_identity'
+            self.psk = security_key
+            self._reset_protocol()
 
-            command = Gateway().generate_psk(self._psk_id)
-            self._psk = yield from self.request(command)
-
-            PatchedDTLSSecurityStore.IDENTITY = self._psk_id.encode('utf-8')
-            PatchedDTLSSecurityStore.KEY = self._psk.encode('utf-8')
+            command = Gateway().generate_psk(psk_id)
+            self.psk = yield from self.request(command)
+            self.psk_id = psk_id
 
             # aiocoap has now cached our psk, so it must be reset.
             # We also no longer need the protocol, so this will clean that up.
             yield from self._reset_protocol()
 
-        return self._psk
+        return self.psk
 
 
 def _process_output(res, parse_json=True):
